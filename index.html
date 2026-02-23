@@ -167,7 +167,7 @@ if (window.pdfjsLib) {
 // 4. Replace YOUR_GROQ_KEY_HERE below
 // Free tier: 14,400 requests / day, forever free
 // ══════════════════════════════════════════════
-window.GROQ_API_KEY = "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";
+window.GROQ_API_KEY = "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";
 
 // PDF text extraction — runs in browser, no cost
 window.extractPDFText = async function(base64) {
@@ -190,38 +190,37 @@ window.extractPDFText = async function(base64) {
 };
 
 // Call Groq API with extracted text
-window.callGroq = async function(apiKey, textContent) {
-  var SYSTEM = `You are Invoice Guardian — the world's most accurate invoice auditor for the Indian market.
-You audit invoices from ALL industries: logistics, petroleum, pharma, IT, marketing, manufacturing, retail, construction, healthcare, finance, legal, FMCG, chemicals, textiles, real estate, telecom — every field.
+window.callGroq = async function(apiKey, textContent, contractText) {
+  var SYSTEM = `You are Invoice Guardian — the world's most accurate contract-vs-invoice auditor for the Indian market.
 
-RULE: Never flag items just because they are from a non-logistics industry. Audit each invoice against its OWN rates and Indian GST rules.
+You receive up to TWO documents:
+1. A CONTRACT (may or may not be provided) — defines agreed rates, GST%, payment terms, scope
+2. An INVOICE — what the vendor is actually billing
 
-EXTRACT exactly as written: vendor, GSTIN, invoice number, dates, every line item (description, HSN/SAC, qty, unit, rate, taxable amount, GST%, GST amount), subtotals, grand total.
+YOUR JOB:
+- If ONLY an invoice is provided: audit it for math errors, GST compliance, unknown surcharges
+- If BOTH contract AND invoice are provided: compare every line item on the invoice against the contract terms. Flag every deviation — overcharge, wrong GST%, service not in scope, wrong quantity, wrong unit, missing discount, etc.
 
-VERIFY MATHS (zero tolerance):
-- qty × rate = taxable amount → if wrong, flag calculation_error
-- taxable × (gst%/100) = gst amount → if wrong, flag calculation_error
-- sum of lines = subtotal → verify
-- subtotal + total_gst = grand_total → verify
+INDUSTRIES COVERED: All — logistics, IT/software, petroleum, pharma, marketing, manufacturing, retail, construction, healthcare, finance, legal, FMCG, chemicals, real estate, telecom. Never reject an invoice just because it's not logistics.
 
-GST RULES (India 2024):
-- Valid slabs: 0%, 5%, 12%, 18%, 28%
-- Petroleum (HSN 27090000-27111900): mostly outside GST, do NOT flag as overcharge
-- Services SAC 9965 (transport): 5% or 12%
-- SAC 9983 (professional/IT/consulting): 18%
-- SAC 9971 (insurance): 18%
-- Medicines (HSN 3004): 5% or 12%
-- If GST% charged differs from correct rate for that HSN/SAC → flag gst_mismatch
+EXTRACTION — read exactly as written:
+- Contract: extract agreed rates per item/service, GST%, payment terms, scope of work, validity period, any penalty clauses
+- Invoice: extract vendor, GSTIN, invoice number, dates, every line item (description, HSN/SAC, qty, unit, rate, taxable amount, GST%, GST amount), subtotals, grand total
 
-OTHER CHECKS:
-- Rate higher than implied contract → flag overcharge with exact difference
-- Charge with no HSN/SAC, not in scope → flag unknown_surcharge
-- Duplicate lines → flag duplicate_risk
-- confidence_score: 95-99 digital text, 85-94 scanned/image
+AUDIT CHECKS:
+1. Math: qty × rate = amount (flag calculation_error if wrong by even ₹1)
+2. GST math: amount × (gst%/100) = gst_amount (flag calculation_error if wrong)
+3. Totals: sum of lines = subtotal, subtotal + gst = grand_total
+4. Contract rate vs billed rate: if invoice rate > contract rate → flag overcharge with exact ₹ difference
+5. Contract GST% vs billed GST%: if different → flag gst_mismatch
+6. Service not in contract: if a line item is not in the contract scope → flag unknown_surcharge
+7. Unknown charges: HSN/SAC missing, "miscellaneous" without explanation → flag unknown_surcharge
+8. GST law compliance: valid slabs 0/5/12/18/28%. Petroleum (HSN 2709-2711) mostly exempt.
 
-Return ONLY a JSON object. No markdown. No explanation. Start with { and end with }.
+CONFIDENCE: 95-99 for digital text, 85-94 for scanned/image docs.
 
-JSON format:
+Return ONLY a JSON object. Start with { end with }. No markdown. No explanation.
+
 {
   "vendor_name": "string",
   "invoice_number": "string",
@@ -231,12 +230,15 @@ JSON format:
   "vendor_address": "string",
   "client": "string",
   "client_gstin": "string",
-  "line_items": [{"description":"","hsn_code":"","quantity":0,"unit":"","unit_rate":0,"amount":0,"gst_rate":0,"gst_amount":0,"is_flagged":false}],
+  "contract_reference": "string or null — contract number/date if found",
+  "contract_validity": "string or null",
+  "line_items": [{"description":"","hsn_code":"","quantity":0,"unit":"","unit_rate":0,"amount":0,"gst_rate":0,"gst_amount":0,"is_flagged":false,"contracted_rate":0,"contracted_gst":0}],
   "subtotal": 0,
   "total_gst": 0,
   "grand_total": 0,
-  "flags": [{"type":"overcharge|gst_mismatch|calculation_error|unknown_surcharge|duplicate_risk","description":"exact explanation with numbers","item":"exact line item name","billed_amount":0,"correct_amount":0,"overcharge_amount":0,"severity":"high|medium|low"}],
-  "audit_summary": {"total_billed":0,"total_correct":0,"total_overcharge":0,"overcharge_percentage":0,"recommendation":"actionable instruction","confidence_score":95}
+  "contract_provided": true,
+  "flags": [{"type":"overcharge|gst_mismatch|calculation_error|unknown_surcharge|duplicate_risk|out_of_scope","description":"exact explanation with numbers from both documents","item":"exact line item name","billed_amount":0,"correct_amount":0,"overcharge_amount":0,"severity":"high|medium|low","contract_clause":"relevant contract clause or null"}],
+  "audit_summary": {"total_billed":0,"total_correct":0,"total_overcharge":0,"overcharge_percentage":0,"contract_compliant":true,"recommendation":"specific actionable instruction","confidence_score":95}
 }`;
 
   var models = [
@@ -260,7 +262,9 @@ JSON format:
           model: model,
           messages: [
             { role: "system", content: SYSTEM },
-            { role: "user", content: "Audit this invoice. Return ONLY JSON:\n\n" + textContent }
+            { role: "user", content: contractText
+                ? "CONTRACT TERMS:\n" + contractText + "\n\n---\n\nINVOICE TO AUDIT AGAINST CONTRACT:\n" + textContent + "\n\nCompare every invoice line against the contract. Return ONLY JSON."
+                : "Audit this invoice. Return ONLY JSON:\n\n" + textContent }
           ],
           temperature: 0.05,
           max_tokens: 4096
@@ -398,6 +402,182 @@ Subtotal: Rs. 32,550.00 | CGST: Rs. 2,585.50 | SGST: Rs. 2,585.50 | Grand Total:
 
 NOTES: Cargo Insurance (HSN 9971) correct GST is 18% not 28%. Express Delivery Surcharge not in contract.`
 };
+
+/* ── DEMO DOCUMENTS: IT SERVICES CONTRACT + INVOICE ── */
+const DEMO_IT_CONTRACT = {
+  id:"it-contract",
+  label:"TechServe Solutions — Service Agreement",
+  ref:"TSS/MST/2024/047",
+  filename:"TechServe_Contract_2024.pdf",
+  text:`SERVICE AGREEMENT — CONTRACT NOTE
+Contract Ref: TSS/MST/2024/047
+Date: 01 November 2024 | Valid Until: 31 October 2025
+
+BETWEEN:
+Service Provider: TechServe Solutions Pvt Ltd
+GSTIN: 27AABCT5432D1Z6
+Address: 14th Floor, One BKC, Bandra Kurla Complex, Mumbai – 400051
+
+AND:
+Client: Mosaic Wellness Pvt Ltd
+GSTIN: 27AACCM5678B2Z3
+Address: 301, Business Hub, Goregaon West, Mumbai – 400104
+
+AGREED SCOPE & RATES:
+────────────────────────────────────────────────────────────
+Service Description          | SAC   | Rate         | GST%
+────────────────────────────────────────────────────────────
+Software Development         | 9983  | Rs.85/hour   | 18%
+UI/UX Design Services        | 9983  | Rs.70/hour   | 18%
+Project Management           | 9983  | Rs.65/hour   | 18%
+Cloud Hosting (AWS/GCP)      | 9983  | Rs.12,000/mo | 18%
+QA & Testing                 | 9983  | Rs.55/hour   | 18%
+Annual Maintenance Contract  | 9987  | Rs.45,000/yr | 18%
+Data Migration (one-time)    | 9983  | Rs.30,000    | 18%
+────────────────────────────────────────────────────────────
+
+PAYMENT TERMS:
+- Payment due: 30 days from invoice date
+- Late payment: 1.5% per month
+- Disputes: within 7 days of invoice receipt
+
+GENERAL CONDITIONS:
+- All rates are exclusive of GST
+- GST applicable at 18% on all services (SAC 9983 / 9987)
+- Any service NOT listed above requires written pre-approval
+- Travel & out-of-pocket expenses billed at actuals with receipts
+- No surcharges or additional fees unless explicitly agreed in writing
+- Invoices must reference this contract number: TSS/MST/2024/047
+
+Signed by:
+TechServe Solutions Pvt Ltd          Mosaic Wellness Pvt Ltd
+Authorised Signatory                  Authorised Signatory
+`};
+
+const DEMO_IT_INVOICE = {
+  id:"it-invoice",
+  vendor:"TechServe Solutions Pvt Ltd",
+  invoice:"TSS-INV-2024-0312",
+  date:"30 Nov 2024",
+  hint:"Invoice has rate overcharges, a GST error, and a service not in contract",
+  gstin:"27AABCT5432D1Z6",
+  address:"14th Floor, One BKC, Bandra Kurla Complex, Mumbai – 400051",
+  client:"Mosaic Wellness Pvt Ltd",
+  client_gstin:"27AACCM5678B2Z3",
+  due:"30 Dec 2024",
+  line_items:[
+    {description:"Software Development",hsn_code:"9983",quantity:120,unit:"hours",unit_rate:95,amount:11400,gst_rate:18,gst_amount:2052},
+    {description:"UI/UX Design Services",hsn_code:"9983",quantity:40,unit:"hours",unit_rate:70,amount:2800,gst_rate:18,gst_amount:504},
+    {description:"Project Management",hsn_code:"9983",quantity:30,unit:"hours",unit_rate:80,amount:2400,gst_rate:18,gst_amount:432},
+    {description:"Cloud Hosting (AWS/GCP)",hsn_code:"9983",quantity:1,unit:"month",unit_rate:12000,amount:12000,gst_rate:28,gst_amount:3360},
+    {description:"QA & Testing",hsn_code:"9983",quantity:25,unit:"hours",unit_rate:55,amount:1375,gst_rate:18,gst_amount:247.5},
+    {description:"Express Delivery Coordination",hsn_code:"N/A",quantity:1,unit:"lump",unit_rate:5000,amount:5000,gst_rate:18,gst_amount:900},
+  ],
+  subtotal:34975, total_gst:7495.5, grand_total:42470.5,
+  contractRef:"TSS/MST/2024/047",
+  text:`GST TAX INVOICE
+Vendor: TechServe Solutions Pvt Ltd | GSTIN: 27AABCT5432D1Z6
+Address: 14th Floor, One BKC, Bandra Kurla Complex, Mumbai – 400051
+Invoice No: TSS-INV-2024-0312 | Date: 30 November 2024 | Due: 30 December 2024
+Contract Ref: TSS/MST/2024/047
+Billed To: Mosaic Wellness Pvt Ltd | GSTIN: 27AACCM5678B2Z3
+
+LINE ITEMS:
+Description                    | SAC  | Qty | Unit  | Rate   | Amount    | GST% | GST Amt
+Software Development           | 9983 | 120 | hrs   | 95.00  | 11400.00  | 18%  | 2052.00
+UI/UX Design Services          | 9983 | 40  | hrs   | 70.00  | 2800.00   | 18%  | 504.00
+Project Management             | 9983 | 30  | hrs   | 80.00  | 2400.00   | 18%  | 432.00
+Cloud Hosting (AWS/GCP)        | 9983 | 1   | month | 12000  | 12000.00  | 28%  | 3360.00
+QA & Testing                   | 9983 | 25  | hrs   | 55.00  | 1375.00   | 18%  | 247.50
+Express Delivery Coordination  | N/A  | 1   | lump  | 5000   | 5000.00   | 18%  | 900.00
+
+Subtotal: Rs. 34,975.00 | CGST: Rs. 3,747.75 | SGST: Rs. 3,747.75 | Grand Total: Rs. 42,470.50
+`};
+
+/* ── CONTRACT PDF DOWNLOAD ── */
+function downloadContractPDF(c) {
+  const rows = [
+    ["Software Development","9983","Rs.85/hour","18%"],
+    ["UI/UX Design Services","9983","Rs.70/hour","18%"],
+    ["Project Management","9983","Rs.65/hour","18%"],
+    ["Cloud Hosting (AWS/GCP)","9983","Rs.12,000/month","18%"],
+    ["QA & Testing","9983","Rs.55/hour","18%"],
+    ["Annual Maintenance Contract","9987","Rs.45,000/year","18%"],
+    ["Data Migration (one-time)","9983","Rs.30,000 fixed","18%"],
+  ].map(([svc,sac,rate,gst]) =>
+    `<tr><td>${svc}</td><td style="font-family:monospace;font-size:11px">${sac}</td><td style="text-align:right">${rate}</td><td style="text-align:center">${gst}</td></tr>`
+  ).join("");
+  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Service Agreement ${c.ref}</title>
+<style>body{font-family:Arial,sans-serif;padding:32px;color:#0f2647;background:#e8f0fa}
+.wrap{max-width:860px;margin:0 auto;background:white;border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(10,40,100,.15)}
+.hdr{background:linear-gradient(135deg,#1a3f7a,#0f2647);color:white;padding:28px 32px}
+.co{font-size:22px;font-weight:800;color:#00d4aa;margin-bottom:4px}
+.det{font-size:12px;color:rgba(255,255,255,.65);line-height:1.8}
+.ref{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.2);border-radius:8px;padding:12px 16px;margin-top:12px}
+.ref-l{font-size:10px;color:rgba(255,255,255,.5);text-transform:uppercase;letter-spacing:.07em;margin-bottom:4px}
+.ref-v{font-size:16px;font-weight:800;color:#00d4aa}
+.body{padding:28px 32px}
+.parties{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:20px}
+.party{background:#eaf2fd;border:1px solid #c5d8f0;border-radius:8px;padding:14px 16px}
+.pl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#007a5e;margin-bottom:6px}
+.pn{font-size:14px;font-weight:700;margin-bottom:3px}.pd{font-size:12px;color:#3a5a84;line-height:1.6}
+.sec{font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.07em;color:#0f2647;margin:20px 0 10px;padding-bottom:6px;border-bottom:2px solid #c5d8f0}
+table{width:100%;border-collapse:collapse;margin-bottom:18px}
+th{background:#0f2647;color:white;padding:9px 11px;text-align:left;font-size:11px;text-transform:uppercase}
+td{padding:9px 11px;border-bottom:1px solid #dce9f5;font-size:13px}
+tr:nth-child(even){background:#f4f8fd}
+.terms-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px}
+.term-box{background:#f4f8fd;border:1px solid #c5d8f0;border-radius:8px;padding:12px}
+.term-l{font-size:10px;font-weight:700;color:#3a5a84;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
+.term-v{font-size:13px;font-weight:600;color:#0f2647}
+.notice{background:#f0fdf4;border:1px solid #86efac;border-radius:7px;padding:10px 14px;font-size:12px;color:#166534;margin-bottom:16px}
+.sigs{display:grid;grid-template-columns:1fr 1fr;gap:32px;padding:20px 32px;background:#eaf2fd;border-top:1px solid #c5d8f0}
+.sig{text-align:center}.sl{height:1px;background:#c5d8f0;margin:36px 0 8px}.sn{font-size:11px;color:#3a5a84}.sc{font-size:13px;font-weight:700}
+@media print{body{background:white;padding:0}.wrap{box-shadow:none;border-radius:0}}
+</style></head><body><div class="wrap">
+<div class="hdr">
+  <div class="co">TechServe Solutions Pvt Ltd</div>
+  <div class="det">GSTIN: 27AABCT5432D1Z6 &nbsp;|&nbsp; 14th Floor, One BKC, Bandra Kurla Complex, Mumbai – 400051</div>
+  <div class="ref"><div class="ref-l">Service Agreement / Contract Note</div><div class="ref-v">${c.ref}</div></div>
+</div>
+<div class="body">
+<div class="notice">&#9989; <b>Invoice Guardian Demo Contract:</b> Upload this contract AND the matching invoice to see AI compare them and detect every deviation automatically.</div>
+<div class="parties">
+  <div class="party"><div class="pl">Service Provider</div><div class="pn">TechServe Solutions Pvt Ltd</div><div class="pd">GSTIN: 27AABCT5432D1Z6<br>14th Floor, One BKC, Mumbai – 400051</div></div>
+  <div class="party"><div class="pl">Client</div><div class="pn">Mosaic Wellness Pvt Ltd</div><div class="pd">GSTIN: 27AACCM5678B2Z3<br>301, Business Hub, Goregaon West, Mumbai – 400104</div></div>
+</div>
+<div class="terms-grid">
+  <div class="term-box"><div class="term-l">Contract Date</div><div class="term-v">01 November 2024</div></div>
+  <div class="term-box"><div class="term-l">Valid Until</div><div class="term-v">31 October 2025</div></div>
+  <div class="term-box"><div class="term-l">Payment Terms</div><div class="term-v">30 days from invoice</div></div>
+  <div class="term-box"><div class="term-l">Late Payment</div><div class="term-v">1.5% per month</div></div>
+</div>
+<div class="sec">Agreed Services & Rates</div>
+<table><thead><tr><th>Service Description</th><th>SAC Code</th><th style="text-align:right">Agreed Rate</th><th style="text-align:center">GST %</th></tr></thead>
+<tbody>${rows}</tbody></table>
+<div class="sec">General Conditions</div>
+<div style="font-size:13px;color:#0f2647;line-height:1.9;margin-bottom:20px">
+1. All rates are exclusive of GST (GST charged additionally at 18%).<br>
+2. Any service NOT listed above requires written pre-approval from client.<br>
+3. No surcharges or additional fees unless explicitly agreed in writing.<br>
+4. Travel & out-of-pocket expenses billed at actuals with receipts only.<br>
+5. Invoices must reference contract number: <strong>${c.ref}</strong><br>
+6. Disputes on invoices must be raised within 7 days of receipt.<br>
+7. Subject to Mumbai jurisdiction. Governed by Indian Contract Act, 1872.
+</div>
+</div>
+<div class="sigs">
+  <div class="sig"><div class="sl"></div><div class="sn">Authorised Signatory</div><div class="sc">TechServe Solutions Pvt Ltd</div></div>
+  <div class="sig"><div class="sl"></div><div class="sn">Authorised Signatory</div><div class="sc">Mosaic Wellness Pvt Ltd</div></div>
+</div>
+</div>
+</body></html>`;
+  const blob = new Blob([html], {type:"text/html;charset=utf-8"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href=url; a.target="_blank";
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url),15000);
+}
 
 /* ── PDF DOWNLOAD ── */
 function downloadDemoPDF(demo) {
@@ -717,6 +897,8 @@ function DashTab({invoices}) {
     oc: invoices.reduce((s,i)=>s+(i.audit_summary?.total_overcharge||0),0),
     issues: invoices.reduce((s,i)=>s+(i.flags?.length||0),0),
   };
+  const contractInvoices = invoices.filter(i=>i.contract_provided);
+  const nonCompliant = invoices.filter(i=>i.contract_provided && i.audit_summary?.contract_compliant===false).length;
   const byType = {};
   invoices.forEach(inv => (inv.flags||[]).forEach(f => { byType[f.type]=(byType[f.type]||0)+1; }));
   const typeTotal = Object.values(byType).reduce((s,v)=>s+v,0)||1;
@@ -725,6 +907,17 @@ function DashTab({invoices}) {
   const maxOC = Math.max(...invoices.map(i=>i.audit_summary?.total_overcharge||0),1);
   return (
     <div className="fi">
+      {contractInvoices.length>0 && (
+        <div style={{background:nonCompliant>0?"var(--rdim)":"var(--adim)",border:`1px solid ${nonCompliant>0?"rgba(255,71,87,.25)":"rgba(0,212,170,.25)"}`,borderRadius:11,padding:"12px 18px",marginBottom:16,display:"flex",alignItems:"center",gap:12}}>
+          <span style={{fontSize:24}}>{nonCompliant>0?"⚠️":"✅"}</span>
+          <div>
+            <div style={{fontWeight:700,fontSize:14,color:nonCompliant>0?"var(--red)":"var(--acc)"}}>
+              {nonCompliant>0?`${nonCompliant} invoice${nonCompliant!==1?"s":""} NOT compliant with contract`:"All invoices are contract-compliant"}
+            </div>
+            <div style={{fontSize:12,color:"var(--tm)",marginTop:2}}>{contractInvoices.length} invoice{contractInvoices.length!==1?"s":""} audited against contract terms</div>
+          </div>
+        </div>
+      )}
       <div className="kpi-grid">
         {[
           {label:"Total Billed",val:inr(tot.billed),foot:`${invoices.length} invoice${invoices.length!==1?"s":""}`,c:"var(--txt)",ic:"💳"},
@@ -824,7 +1017,7 @@ function InvoicesTab({invoices, onSelect}) {
   return <div className="fi"><div className="card">
     <div className="card-hd"><div><div className="card-t">All Invoices</div><div className="card-s">Click any row for full audit detail</div></div></div>
     <div className="tw"><table>
-      <thead><tr><th>Vendor</th><th>Invoice #</th><th>Date</th><th>Due</th><th>Billed</th><th>Overcharge</th><th>Flags</th><th>Confidence</th><th>Status</th></tr></thead>
+      <thead><tr><th>Vendor</th><th>Invoice #</th><th>Date</th><th>Due</th><th>Billed</th><th>Overcharge</th><th>Flags</th><th>Contract</th><th>Confidence</th><th>Status</th></tr></thead>
       <tbody>{invoices.map(inv => {
         const oc = inv.audit_summary?.total_overcharge||0;
         return <tr key={inv.id} onClick={() => onSelect(inv)}>
@@ -835,6 +1028,7 @@ function InvoicesTab({invoices, onSelect}) {
           <td style={{fontFamily:"var(--m)",fontWeight:600}}>{inr(inv.audit_summary?.total_billed)}</td>
           <td style={{fontFamily:"var(--m)",fontWeight:700,color:oc>0?"var(--red)":"var(--acc)"}}>{oc>0?`▲ ${inr(oc)}`:"✓ None"}</td>
           <td><span className={`b ${(inv.flags?.length||0)>0?"br":"bg"}`}>{inv.flags?.length||0} flag{inv.flags?.length!==1?"s":""}</span></td>
+          <td>{inv.contract_provided?<span className={`b ${inv.audit_summary?.contract_compliant===false?"br":"bg"}`}>{inv.audit_summary?.contract_compliant===false?"✗ Non-Compliant":"✓ Compliant"}</span>:<span className="bgr b">No Contract</span>}</td>
           <td><span className="b bb">{inv.audit_summary?.confidence_score||95}%</span></td>
           <td><span className={`b ${oc>0?"br":"bg"}`}>{oc>0?"Disputed":"Approved"}</span></td>
         </tr>;
@@ -936,6 +1130,10 @@ function App() {
   const [file64, setFile64] = useState(null);
   const [fileType, setFileType] = useState(null);
   const [fileName, setFileName] = useState("");
+  const [contract64, setContract64] = useState(null);
+  const [contractType, setContractType] = useState(null);
+  const [contractName, setContractName] = useState("");
+  const [contractDrag, setContractDrag] = useState(false);
   const [drag, setDrag] = useState(false);
   const [err, setErr] = useState("");
   const [selInv, setSelInv] = useState(null);
@@ -962,8 +1160,21 @@ function App() {
     rd.readAsDataURL(file);
   };
 
+  const readContract = file => {
+    if(!file) return;
+    const rd = new FileReader();
+    rd.onload = e => {
+      setContract64(e.target.result.split(",")[1]);
+      setContractType(file.type);
+      setContractName(file.name);
+      setErr("");
+    };
+    rd.onerror = () => setErr("Could not read contract file.");
+    rd.readAsDataURL(file);
+  };
+
   /* Core analysis — used for demos and uploads */
-  const runAnalysis = async ({textContent, fileData, fileMime, label}) => {
+  const runAnalysis = async ({textContent, fileData, fileMime, label, contractTextContent, contractData, contractMime, contractLabel}) => {
     const key = window.GROQ_API_KEY;
     if (!key || key === "YOUR_GROQ_KEY_HERE") {
       setErr("⚠️ API key not set.\n\nOpen index.html in Notepad, find YOUR_GROQ_KEY_HERE and replace it with your free Groq key.\n\nGet a free key at console.groq.com — no credit card needed. Key starts with gsk_");
@@ -993,26 +1204,36 @@ function App() {
 
     try {
       let text = textContent || "";
+      let contractText = contractTextContent || "";
 
-      // Extract text from uploaded files
+      // Extract text from uploaded invoice file
       if (!text && fileData) {
-        setAStep(0); setAPct(8);
+        setAStep(0); setAPct(6);
         if (fileMime === "application/pdf") {
           text = await window.extractPDFText(fileData);
         } else if (fileMime && fileMime.startsWith("image/")) {
-          // For images: send the raw base64 to a vision-capable description
-          // Groq llama vision — encode as message
-          text = `[IMAGE INVOICE - ${label}]\nThis is a scanned invoice image. Please extract all visible text, numbers, line items, GST rates, totals, and vendor information from the image, then audit it.`;
-          // Note: we'll attach image separately via a different path
-          // For now extract what we can from filename context
+          text = `[IMAGE INVOICE - ${label}]\nThis is a scanned invoice image. Extract all text, numbers, line items, GST rates, totals, vendor info from the image and audit it.`;
+        } else {
+          text = `Invoice file: ${label} (${fileMime || "unknown format"})`;
+        }
+      }
+      if (!text || text.length < 20) {
+        text = `Invoice: ${label}\n[Could not extract text — ensure the PDF has selectable text or use a clearer image]`;
+      }
+
+      // Extract text from uploaded contract file
+      if (!contractText && contractData) {
+        setAStep(1); setAPct(18);
+        if (contractMime === "application/pdf") {
+          contractText = await window.extractPDFText(contractData);
+        } else if (contractMime && contractMime.startsWith("image/")) {
+          contractText = `[IMAGE CONTRACT - ${contractLabel}]\nThis is a scanned contract image. Extract all agreed rates, GST%, services, and terms from this contract.`;
+        } else {
+          contractText = `Contract file: ${contractLabel}`;
         }
       }
 
-      if (!text || text.length < 50) {
-        text = `Invoice file: ${label}\n[Could not extract text — please ensure the PDF has selectable text, or use a clearer image]`;
-      }
-
-      const result = await window.callGroq(key, text);
+      const result = await window.callGroq(key, text, contractText || null);
       result.id = "inv-" + Date.now();
 
       clearInterval(iv);
@@ -1031,6 +1252,7 @@ function App() {
         const oc = result.audit_summary?.total_overcharge||0;
         showToast(flags>0?`${flags} issue${flags>1?"s":""} found — ${inr(oc)} recoverable`:"Invoice is clean ✓");
         setFile64(null); setFileName(""); setFileType(null);
+        setContract64(null); setContractName(""); setContractType(null);
       }, 500);
 
     } catch(e) {
@@ -1047,13 +1269,29 @@ function App() {
     }
   };
 
+  const runDemoWithContract = (inv, contract) => {
+    runAnalysis({
+      textContent: inv.text,
+      label: inv.invoice,
+      contractTextContent: contract.text,
+      contractLabel: contract.ref,
+    });
+  };
+
   const runDemo = demo => {
     runAnalysis({textContent: demo.text, label: demo.invoice});
   };
 
+  const contractRef = useRef(null);
+
   const runUpload = () => {
     if(!file64) return;
-    runAnalysis({fileData:file64, fileMime:fileType, label:fileName});
+    runAnalysis({
+      fileData:file64, fileMime:fileType, label:fileName,
+      contractData: contract64||null,
+      contractMime: contractType||null,
+      contractLabel: contractName||null,
+    });
   };
 
   const tabList = [
@@ -1117,27 +1355,59 @@ function App() {
 
           <div className="fu2">
             <div className="up-panel">
+              {/* CONTRACT UPLOAD */}
+              <div style={{fontSize:11,fontWeight:700,color:"var(--tm)",textTransform:"uppercase",letterSpacing:".08em",marginBottom:8}}>
+                Step 1 — Upload Contract <span style={{color:"var(--tm)",fontWeight:400}}>(optional but recommended)</span>
+              </div>
+              <div
+                className={`up-zone${contractDrag?" drag":""}${contract64?" rdy":""}`}
+                style={{padding:"18px 20px",marginBottom:10}}
+                onDragOver={e=>{e.preventDefault();setContractDrag(true);}}
+                onDragLeave={()=>setContractDrag(false)}
+                onDrop={e=>{e.preventDefault();setContractDrag(false);readContract(e.dataTransfer.files[0]);}}
+                onClick={()=>contractRef.current?.click()}
+              >
+                <div style={{fontSize:28,marginBottom:6}}>{contract64?"📋":"📄"}</div>
+                <div style={{fontSize:13,fontWeight:700,color:contract64?"var(--acc)":"var(--txt)",marginBottom:3}}>
+                  {contractName||"Drop contract / agreement here"}
+                </div>
+                <div style={{fontSize:12,color:"var(--tm)"}}>
+                  {contract64?`${contractName} — contract loaded`:"PDF, PNG, JPG, JPEG, WEBP, TIFF"}
+                </div>
+                <input ref={contractRef} type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.tiff,.bmp" style={{display:"none"}}
+                  onChange={e=>{if(e.target.files[0])readContract(e.target.files[0]);e.target.value="";}}/>
+              </div>
+
+              {/* INVOICE UPLOAD */}
+              <div style={{fontSize:11,fontWeight:700,color:"var(--tm)",textTransform:"uppercase",letterSpacing:".08em",marginBottom:8}}>
+                Step 2 — Upload Invoice <span style={{color:"var(--red)",fontWeight:700}}>*</span>
+              </div>
               <div
                 className={`up-zone${drag?" drag":""}${file64?" rdy":""}`}
+                style={{padding:"18px 20px",marginBottom:10}}
                 onDragOver={e=>{e.preventDefault();setDrag(true);}}
                 onDragLeave={()=>setDrag(false)}
                 onDrop={e=>{e.preventDefault();setDrag(false);readFile(e.dataTransfer.files[0]);}}
                 onClick={()=>fileRef.current?.click()}
               >
-                <div style={{fontSize:44,marginBottom:11}}>{file64?"✅":"☁️"}</div>
-                <div style={{fontSize:15,fontWeight:700,color:file64?"var(--acc)":"var(--txt)",marginBottom:5}}>
-                  {fileName||"Drop your invoice here or click to upload"}
+                <div style={{fontSize:28,marginBottom:6}}>{file64?"✅":"☁️"}</div>
+                <div style={{fontSize:13,fontWeight:700,color:file64?"var(--acc)":"var(--txt)",marginBottom:3}}>
+                  {fileName||"Drop invoice here or click to upload"}
                 </div>
-                <div style={{fontSize:13,color:"var(--tm)"}}>
-                  {file64?`${fileName} — ready for audit`:"PDF, PNG, JPG, WEBP — any vendor format"}
+                <div style={{fontSize:12,color:"var(--tm)"}}>
+                  {file64?`${fileName} — ready for audit`:"PDF, PNG, JPG, JPEG, WEBP, TIFF — any vendor format"}
                 </div>
-                <input ref={fileRef} type="file" accept=".pdf,.png,.jpg,.jpeg,.webp" style={{display:"none"}}
+                <input ref={fileRef} type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.tiff,.bmp" style={{display:"none"}}
                   onChange={e=>{if(e.target.files[0])readFile(e.target.files[0]);e.target.value="";}}/>
               </div>
 
+              {contract64 && <div style={{fontSize:12,color:"var(--acc)",marginBottom:8,display:"flex",alignItems:"center",gap:6}}>
+                <span>📋</span> Contract loaded — AI will compare invoice against contract terms
+              </div>}
+
               {file64 && (
-                <button className="btn btn-acc btn-lg" style={{width:"100%",justifyContent:"center",marginTop:12}} onClick={runUpload}>
-                  ▶ Run AI Audit →
+                <button className="btn btn-acc btn-lg" style={{width:"100%",justifyContent:"center",marginTop:4}} onClick={runUpload}>
+                  {contract64?"▶ Audit Invoice vs Contract →":"▶ Run AI Audit →"}
                 </button>
               )}
 
@@ -1147,7 +1417,7 @@ function App() {
                 </div>
               )}
 
-              <div className="demo-lbl">Try a demo invoice — choose one:</div>
+              <div className="demo-lbl">Demo 1 — Invoice Only</div>
               {[DEMO_FTL, DEMO_BSC].map(demo =>
                 <div key={demo.id} className="demo-card">
                   <div className="demo-top">
@@ -1156,8 +1426,8 @@ function App() {
                       <div className="demo-s">{demo.invoice} · {demo.date}</div>
                     </div>
                     <div className="demo-btns">
-                      <button className="btn btn-ghost btn-sm" onClick={()=>downloadDemoPDF(demo)}>⬇ PDF</button>
-                      <button className="btn btn-acc btn-sm" onClick={()=>runDemo(demo)}>▶ Audit This</button>
+                      <button className="btn btn-ghost btn-sm" onClick={()=>downloadDemoPDF(demo)}>⬇ Invoice PDF</button>
+                      <button className="btn btn-acc btn-sm" onClick={()=>runDemo(demo)}>▶ Audit</button>
                     </div>
                   </div>
                   <div style={{background:"var(--s3)",borderRadius:7,padding:"8px 11px",fontSize:12,color:"var(--tm)",borderLeft:"2px solid var(--bd2)"}}>
@@ -1166,13 +1436,32 @@ function App() {
                 </div>
               )}
 
+              <div className="demo-lbl" style={{marginTop:16}}>Demo 2 — Contract + Invoice (Full Audit)</div>
+              <div className="demo-card" style={{borderColor:"rgba(0,212,170,.25)"}}>
+                <div className="demo-top">
+                  <div>
+                    <div className="demo-n">TechServe Solutions — IT Services</div>
+                    <div className="demo-s">Contract TSS/MST/2024/047 + Invoice TSS-INV-2024-0312</div>
+                  </div>
+                  <div className="demo-btns">
+                    <button className="btn btn-ghost btn-sm" onClick={()=>downloadContractPDF(DEMO_IT_CONTRACT)}>⬇ Contract</button>
+                    <button className="btn btn-ghost btn-sm" onClick={()=>downloadDemoPDF(DEMO_IT_INVOICE)}>⬇ Invoice</button>
+                    <button className="btn btn-acc btn-sm" onClick={()=>runDemoWithContract(DEMO_IT_INVOICE, DEMO_IT_CONTRACT)}>▶ Full Audit</button>
+                  </div>
+                </div>
+                <div style={{background:"var(--adim)",borderRadius:7,padding:"8px 11px",fontSize:12,color:"var(--acc)",borderLeft:"2px solid var(--bd2)"}}>
+                  ✨ AI compares invoice against contract — finds rate deviations, wrong GST, out-of-scope charges
+                </div>
+              </div>
+
               <div className="info">
                 <div className="info-t">💡 How it works</div>
                 <div className="info-b">
-                  1. Upload any invoice PDF or image<br/>
-                  2. AI extracts every line item, rate, GST%, HSN code<br/>
-                  3. Cross-checks against Indian GST rules & contract rates<br/>
-                  4. Full audit: findings, recovery amount & legal basis
+                  1. <strong style={{color:"var(--txt)"}}>Upload contract</strong> (optional) — any format<br/>
+                  2. <strong style={{color:"var(--txt)"}}>Upload invoice</strong> — PDF, JPG, PNG, WEBP...<br/>
+                  3. AI extracts every line item, rate, GST%, HSN code<br/>
+                  4. If contract uploaded: compares every line against agreed terms<br/>
+                  5. Full audit: overcharges, GST errors, out-of-scope charges
                 </div>
               </div>
             </div>
@@ -1228,3 +1517,4 @@ ReactDOM.render(React.createElement(App), document.getElementById("root"));
 </script>
 </body>
 </html>
+
